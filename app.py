@@ -1,4 +1,3 @@
-app_code = '''
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -16,18 +15,20 @@ def load_all():
         rf = pickle.load(f)
     with open("scaler.pkl", "rb") as f:
         scaler = pickle.load(f)
-    with open("label_encoders.pkl", "rb") as f:
-        le = pickle.load(f)
     with open("feature_cols.pkl", "rb") as f:
         fc = pickle.load(f)
-    return lr, rf, scaler, le, fc
+    with open("dummy_columns.pkl", "rb") as f:
+        dc = pickle.load(f)
+    with open("original_categories.pkl", "rb") as f:
+        oc = pickle.load(f)
+    return lr, rf, scaler, fc, dc, oc
 
 @st.cache_data
 def load_data():
     df = pd.read_csv("vehicaLCO2EMISSION.csv")
     return df.drop_duplicates().dropna()
 
-lr_model, rf_model, scaler, label_encoders, feature_cols = load_all()
+lr_model, rf_model, scaler, feature_cols, dummy_cols, original_categories = load_all()
 df = load_data()
 
 st.sidebar.title("🌿 CO2 Predictor")
@@ -41,9 +42,9 @@ if page == "🏠 Home":
     st.markdown("---")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Total Records", f"{len(df):,}")
-    c2.metric("Avg CO2 (g/km)", f"{df[\'CO2 Emissions(g/km)\'].mean():.1f}")
-    c3.metric("Min CO2", f"{df[\'CO2 Emissions(g/km)\'].min()}")
-    c4.metric("Max CO2", f"{df[\'CO2 Emissions(g/km)\'].max()}")
+    c2.metric("Avg CO2 (g/km)", f"{df['CO2 Emissions(g/km)'].mean():.1f}")
+    c3.metric("Min CO2", f"{df['CO2 Emissions(g/km)'].min()}")
+    c4.metric("Max CO2", f"{df['CO2 Emissions(g/km)'].max()}")
     st.markdown("---")
     col1, col2 = st.columns(2)
     with col1:
@@ -65,16 +66,20 @@ if page == "🏠 Home":
 
 elif page == "🔍 Predict":
     st.title("🔍 Predict CO2 Emission")
+    st.markdown("All vehicle features — including Make, Class, Transmission, and Fuel Type — now meaningfully influence the prediction.")
     st.markdown("---")
     col1, col2, col3 = st.columns(3)
+
     with col1:
-        make      = st.selectbox("Make",          sorted(df["Make"].unique()))
-        veh_class = st.selectbox("Vehicle Class", sorted(df["Vehicle Class"].unique()))
-        fuel_type = st.selectbox("Fuel Type",     sorted(df["Fuel Type"].unique()))
+        make      = st.selectbox("Make",          original_categories["Make"])
+        veh_class = st.selectbox("Vehicle Class", original_categories["Vehicle Class"])
+        fuel_type = st.selectbox("Fuel Type",     original_categories["Fuel Type"])
+
     with col2:
-        engine_size  = st.slider("Engine Size (L)",     0.9, 8.4, 2.0, 0.1)
-        cylinders    = st.selectbox("Cylinders",        sorted(df["Cylinders"].unique()))
-        transmission = st.selectbox("Transmission",     sorted(df["Transmission"].unique()))
+        engine_size  = st.slider("Engine Size (L)", 0.9, 8.4, 2.0, 0.1)
+        cylinders    = st.selectbox("Cylinders",    sorted(df["Cylinders"].unique()))
+        transmission = st.selectbox("Transmission", original_categories["Transmission"])
+
     with col3:
         fuel_city = st.slider("Fuel City (L/100km)",  3.0, 30.0, 10.0, 0.1)
         fuel_hwy  = st.slider("Fuel Hwy (L/100km)",   3.0, 25.0,  8.0, 0.1)
@@ -84,39 +89,48 @@ elif page == "🔍 Predict":
     model_choice = st.radio("Choose Model", ["Linear Regression", "Random Forest"], horizontal=True)
 
     if st.button("🚀 Predict", type="primary"):
-        def safe_encode(col, val):
-            le = label_encoders[col]
-            if val in le.classes_:
-                return int(le.transform([val])[0])
-            return 0
-        row = {
-            "Make":                             safe_encode("Make", make),
-            "Vehicle Class":                    safe_encode("Vehicle Class", veh_class),
-            "Engine Size(L)":                   engine_size,
-            "Cylinders":                        cylinders,
-            "Transmission":                     safe_encode("Transmission", transmission),
-            "Fuel Type":                        safe_encode("Fuel Type", fuel_type),
-            "Fuel Consumption City (L/100 km)": fuel_city,
-            "Fuel Consumption Hwy (L/100 km)":  fuel_hwy,
-            "Fuel Consumption Comb (L/100 km)": fuel_comb,
-            "Fuel Consumption Comb (mpg)":      fuel_mpg,
-        }
+        # Start with all dummy columns set to 0
+        row = {col: 0 for col in dummy_cols}
+
+        # Set the relevant one-hot flags to 1
+        def set_dummy(prefix, value):
+            col_name = f"{prefix}_{value}"
+            if col_name in row:
+                row[col_name] = 1
+
+        set_dummy("Make", make)
+        set_dummy("Vehicle Class", veh_class)
+        set_dummy("Transmission", transmission)
+        set_dummy("Fuel Type", fuel_type)
+
+        # Add numeric features
+        row["Engine Size(L)"] = engine_size
+        row["Cylinders"] = cylinders
+        row["Fuel Consumption City (L/100 km)"] = fuel_city
+        row["Fuel Consumption Hwy (L/100 km)"] = fuel_hwy
+        row["Fuel Consumption Comb (L/100 km)"] = fuel_comb
+        row["Fuel Consumption Comb (mpg)"] = fuel_mpg
+
         input_df     = pd.DataFrame([row])[feature_cols]
         input_scaled = scaler.transform(input_df)
+
         if model_choice == "Linear Regression":
             prediction = lr_model.predict(input_scaled)[0]
         else:
             prediction = rf_model.predict(input_scaled)[0]
+
         if prediction < 150:
             zone, color, msg = "🟢 LOW",    "green",  "✅ Eco-friendly vehicle!"
         elif prediction < 250:
             zone, color, msg = "🟡 MEDIUM", "orange", "⚠️ Moderate emissions."
         else:
             zone, color, msg = "🔴 HIGH",   "red",    "❌ High emitter!"
+
         st.markdown("---")
         r1, r2 = st.columns(2)
         r1.metric("Predicted CO2 (g/km)", f"{prediction:.1f}")
         r2.markdown(f"### Emission Zone: {zone}")
+
         fig, ax = plt.subplots(figsize=(8, 1.2))
         ax.barh(["CO2"], [prediction], color=color, height=0.4)
         ax.set_xlim(0, 600)
@@ -124,6 +138,7 @@ elif page == "🔍 Predict":
         ax.axvline(250, color="red",   linestyle="--", linewidth=1)
         ax.set_xlabel("CO2 (g/km)")
         st.pyplot(fig)
+
         if color == "green":
             st.success(msg)
         elif color == "orange":
@@ -165,6 +180,7 @@ elif page == "ℹ️ About":
     | **Domain** | Environment & Climate |
     | **Goal** | SDG 13 — Climate Action |
     | **Models** | Linear Regression, Random Forest |
+    | **Encoding** | One-Hot Encoding (categorical), Standard Scaler (numeric) |
     | **UI** | Streamlit |
     | **Dataset** | 7,385 vehicle records |
     """)
@@ -174,9 +190,3 @@ elif page == "ℹ️ About":
     - 🟡 Medium — 150 to 250 g/km
     - 🔴 High — CO2 > 250 g/km
     """)
-'''
-
-with open("app.py", "w") as f:
-    f.write(app_code)
-
-print("✅ app.py created successfully!")
